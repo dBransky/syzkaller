@@ -366,18 +366,31 @@ func (vrf *Verifier) fuzzingLoop(ctx context.Context) {
 			return
 		default:
 		}
-
 		if vrf.phase < vrfPhaseFuzzing {
 			log.Logf(0, "waiting for enabled syscalls and features")
 			totalEnabledSyscalls := make(map[*prog.Syscall]bool)
+			firstKernel := true
 			faultFeature := false
 			compariosonFeature := false
 			for _, kernel := range vrf.kernels {
 				if kernel.phase <= kPhaseAwaitingQueue {
 					log.Logf(0, "waiting for kernel %s to be ready", kernel.cfg.Name)
 					enabledSyscalls := <-kernel.enabledSyscalls
-					for k, v := range enabledSyscalls {
-						totalEnabledSyscalls[k] = v && totalEnabledSyscalls[k] // merge enabled syscalls
+					// merge: start with first kernel's enabled set, then keep only syscalls
+					// enabled on all subsequent kernels (intersection).
+					if firstKernel {
+						for sc, en := range enabledSyscalls {
+							if en {
+								totalEnabledSyscalls[sc] = true
+							}
+						}
+						firstKernel = false
+					} else {
+						for sc := range totalEnabledSyscalls {
+							if !enabledSyscalls[sc] {
+								delete(totalEnabledSyscalls, sc)
+							}
+						}
 					}
 					kernelFeatures := <-kernel.features
 					faultFeature = ((kernelFeatures & flatrpc.FeatureFault) == 1) && faultFeature
@@ -472,6 +485,24 @@ func (vrf *Verifier) fuzzingLoop(ctx context.Context) {
 			log.Logf(2, "distributed program to %d kernels", distributed)
 			wg.Wait()
 			log.Logf(3, "all %d kernels finished execution", len(vrf.sources))
+
+			// Hand canonical result to fuzzer before running comparison logic.
+			if req != nil {
+				var chosen *queue.Result
+				for i := 0; i < len(responses); i++ {
+					if responses[i] != nil {
+						chosen = responses[i]
+						break
+					}
+				}
+				if chosen != nil {
+					log.Logf(2, "returning canonical result to fuzzer (selected kernel result)")
+					req.Done(chosen)
+				} else {
+					log.Logf(2, "no kernel results available to return to fuzzer")
+				}
+			}
+
 			log.Logf(3, "comparing results for %d kernels", len(vrf.sources))
 
 			opts := []cmp.Option{
