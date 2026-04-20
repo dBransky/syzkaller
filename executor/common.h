@@ -80,6 +80,7 @@ static unsigned long long procid;
 #include <string.h>
 
 #if GOOS_linux
+#include <sys/ptrace.h>
 #include <sys/syscall.h>
 #endif
 
@@ -655,6 +656,14 @@ static void loop(void)
 #endif
 #if SYZ_EXECUTOR
 			close(kOutPipeFd);
+#if GOOS_linux
+			if (flag_memcmp) {
+				if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
+					perror("ptrace TRACEME");
+					doexit(1);
+				}
+			}
+#endif
 #endif
 			execute_one();
 #if !SYZ_EXECUTOR && SYZ_HAVE_CLOSE_FDS && !SYZ_THREADED
@@ -680,11 +689,43 @@ static void loop(void)
 #if SYZ_EXECUTOR
 		uint64 last_executed = start;
 		uint32 executed_calls = output_data->completed.load(std::memory_order_relaxed);
+#if GOOS_linux
+		int times_stopped = 0;
+#endif
 #endif
 		for (;;) {
 			sleep_ms(10);
-			if (waitpid(-1, &status, WNOHANG | WAIT_FLAGS) == pid)
-				break;
+			if (waitpid(-1, &status, WNOHANG | WAIT_FLAGS) == pid) {
+#if SYZ_EXECUTOR
+#if GOOS_linux
+				if (flag_memcmp && WIFSTOPPED(status) && WSTOPSIG(status) == SIGSTOP) {
+					times_stopped++;
+					const bool is_snapshot = (times_stopped == 1);
+					const bool is_after = (times_stopped == 2);
+					if (!output_data || (!is_snapshot && !is_after)) {
+						if (ptrace(PTRACE_CONT, pid, NULL, NULL) == -1)
+							debug("ptrace CONT failed for pid %d: %s\n", pid, strerror(errno));
+						continue;
+					}
+					uint64 hash_start_time = current_time_ms();
+					memory_region* out = is_snapshot ? output_data->snapshot_vmas : output_data->after_vmas;
+					uint32 cnt = collect_child_vmas(pid, out, kMaxVmas);
+					uint64 hash_duration = current_time_ms() - hash_start_time;
+					if (is_snapshot) {
+						output_data->snapshot_vmas_count = cnt;
+					} else {
+						output_data->after_vmas_count = cnt;
+					}
+					if (ptrace(PTRACE_CONT, pid, NULL, NULL) != -1) {
+						last_executed = current_time_ms();
+						start += hash_duration;
+					}
+					continue;
+				} else
+#endif
+#endif
+					break;
+			}
 #if SYZ_EXECUTOR
 			// Even though the test process executes exit at the end
 			// and execution time of each syscall is bounded by syscall_timeout_ms (~50ms),

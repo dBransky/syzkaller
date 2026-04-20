@@ -403,6 +403,7 @@ const (
 	ExecFlagDedupCover    ExecFlag = 4
 	ExecFlagCollectComps  ExecFlag = 8
 	ExecFlagThreaded      ExecFlag = 16
+	ExecFlagMemCmp        ExecFlag = 32
 )
 
 var EnumNamesExecFlag = map[ExecFlag]string{
@@ -411,6 +412,7 @@ var EnumNamesExecFlag = map[ExecFlag]string{
 	ExecFlagDedupCover:    "DedupCover",
 	ExecFlagCollectComps:  "CollectComps",
 	ExecFlagThreaded:      "Threaded",
+	ExecFlagMemCmp:        "MemCmp",
 }
 
 var EnumValuesExecFlag = map[string]ExecFlag{
@@ -419,6 +421,7 @@ var EnumValuesExecFlag = map[string]ExecFlag{
 	"DedupCover":    ExecFlagDedupCover,
 	"CollectComps":  ExecFlagCollectComps,
 	"Threaded":      ExecFlagThreaded,
+	"MemCmp":        ExecFlagMemCmp,
 }
 
 func (v ExecFlag) String() string {
@@ -3024,12 +3027,169 @@ func CreateComparisonRaw(builder *flatbuffers.Builder, pc uint64, op1 uint64, op
 	return builder.Offset()
 }
 
+type VmaRawT struct {
+	Start      uint64 `json:"start"`
+	End        uint64 `json:"end"`
+	Perms      uint32 `json:"perms"`
+	MemoryHash uint32 `json:"memory_hash"`
+	Name       string `json:"name"`
+}
+
+func (t *VmaRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	if t == nil {
+		return 0
+	}
+	nameOffset := flatbuffers.UOffsetT(0)
+	if t.Name != "" {
+		nameOffset = builder.CreateString(t.Name)
+	}
+	VmaRawStart(builder)
+	VmaRawAddStart(builder, t.Start)
+	VmaRawAddEnd(builder, t.End)
+	VmaRawAddPerms(builder, t.Perms)
+	VmaRawAddMemoryHash(builder, t.MemoryHash)
+	VmaRawAddName(builder, nameOffset)
+	return VmaRawEnd(builder)
+}
+
+func (rcv *VmaRaw) UnPackTo(t *VmaRawT) {
+	t.Start = rcv.Start()
+	t.End = rcv.End()
+	t.Perms = rcv.Perms()
+	t.MemoryHash = rcv.MemoryHash()
+	t.Name = string(rcv.Name())
+}
+
+func (rcv *VmaRaw) UnPack() *VmaRawT {
+	if rcv == nil {
+		return nil
+	}
+	t := &VmaRawT{}
+	rcv.UnPackTo(t)
+	return t
+}
+
+type VmaRaw struct {
+	_tab flatbuffers.Table
+}
+
+func GetRootAsVmaRaw(buf []byte, offset flatbuffers.UOffsetT) *VmaRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &VmaRaw{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func FinishVmaRawBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.Finish(offset)
+}
+
+func GetSizePrefixedRootAsVmaRaw(buf []byte, offset flatbuffers.UOffsetT) *VmaRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &VmaRaw{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func FinishSizePrefixedVmaRawBuffer(builder *flatbuffers.Builder, offset flatbuffers.UOffsetT) {
+	builder.FinishSizePrefixed(offset)
+}
+
+func (rcv *VmaRaw) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *VmaRaw) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *VmaRaw) Start() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *VmaRaw) MutateStart(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(4, n)
+}
+
+func (rcv *VmaRaw) End() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *VmaRaw) MutateEnd(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(6, n)
+}
+
+func (rcv *VmaRaw) Perms() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *VmaRaw) MutatePerms(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(8, n)
+}
+
+func (rcv *VmaRaw) MemoryHash() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *VmaRaw) MutateMemoryHash(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(10, n)
+}
+
+func (rcv *VmaRaw) Name() []byte {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.ByteVector(o + rcv._tab.Pos)
+	}
+	return nil
+}
+
+func VmaRawStart(builder *flatbuffers.Builder) {
+	builder.StartObject(5)
+}
+func VmaRawAddStart(builder *flatbuffers.Builder, start uint64) {
+	builder.PrependUint64Slot(0, start, 0)
+}
+func VmaRawAddEnd(builder *flatbuffers.Builder, end uint64) {
+	builder.PrependUint64Slot(1, end, 0)
+}
+func VmaRawAddPerms(builder *flatbuffers.Builder, perms uint32) {
+	builder.PrependUint32Slot(2, perms, 0)
+}
+func VmaRawAddMemoryHash(builder *flatbuffers.Builder, memoryHash uint32) {
+	builder.PrependUint32Slot(3, memoryHash, 0)
+}
+func VmaRawAddName(builder *flatbuffers.Builder, name flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(name), 0)
+}
+func VmaRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
+
 type ProgInfoRawT struct {
-	Calls     []*CallInfoRawT `json:"calls"`
-	ExtraRaw  []*CallInfoRawT `json:"extra_raw"`
-	Extra     *CallInfoRawT   `json:"extra"`
-	Elapsed   uint64          `json:"elapsed"`
-	Freshness uint64          `json:"freshness"`
+	Calls        []*CallInfoRawT `json:"calls"`
+	ExtraRaw     []*CallInfoRawT `json:"extra_raw"`
+	Extra        *CallInfoRawT   `json:"extra"`
+	SnapshotVmas []*VmaRawT      `json:"snapshot_vmas"`
+	AfterVmas    []*VmaRawT      `json:"after_vmas"`
+	Elapsed      uint64          `json:"elapsed"`
+	Freshness    uint64          `json:"freshness"`
 }
 
 func (t *ProgInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
@@ -3063,10 +3223,38 @@ func (t *ProgInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 		extraRawOffset = builder.EndVector(extraRawLength)
 	}
 	extraOffset := t.Extra.Pack(builder)
+	snapshotVmasOffset := flatbuffers.UOffsetT(0)
+	if t.SnapshotVmas != nil {
+		snapshotVmasLength := len(t.SnapshotVmas)
+		snapshotVmasOffsets := make([]flatbuffers.UOffsetT, snapshotVmasLength)
+		for j := 0; j < snapshotVmasLength; j++ {
+			snapshotVmasOffsets[j] = t.SnapshotVmas[j].Pack(builder)
+		}
+		ProgInfoRawStartSnapshotVmasVector(builder, snapshotVmasLength)
+		for j := snapshotVmasLength - 1; j >= 0; j-- {
+			builder.PrependUOffsetT(snapshotVmasOffsets[j])
+		}
+		snapshotVmasOffset = builder.EndVector(snapshotVmasLength)
+	}
+	afterVmasOffset := flatbuffers.UOffsetT(0)
+	if t.AfterVmas != nil {
+		afterVmasLength := len(t.AfterVmas)
+		afterVmasOffsets := make([]flatbuffers.UOffsetT, afterVmasLength)
+		for j := 0; j < afterVmasLength; j++ {
+			afterVmasOffsets[j] = t.AfterVmas[j].Pack(builder)
+		}
+		ProgInfoRawStartAfterVmasVector(builder, afterVmasLength)
+		for j := afterVmasLength - 1; j >= 0; j-- {
+			builder.PrependUOffsetT(afterVmasOffsets[j])
+		}
+		afterVmasOffset = builder.EndVector(afterVmasLength)
+	}
 	ProgInfoRawStart(builder)
 	ProgInfoRawAddCalls(builder, callsOffset)
 	ProgInfoRawAddExtraRaw(builder, extraRawOffset)
 	ProgInfoRawAddExtra(builder, extraOffset)
+	ProgInfoRawAddSnapshotVmas(builder, snapshotVmasOffset)
+	ProgInfoRawAddAfterVmas(builder, afterVmasOffset)
 	ProgInfoRawAddElapsed(builder, t.Elapsed)
 	ProgInfoRawAddFreshness(builder, t.Freshness)
 	return ProgInfoRawEnd(builder)
@@ -3088,6 +3276,20 @@ func (rcv *ProgInfoRaw) UnPackTo(t *ProgInfoRawT) {
 		t.ExtraRaw[j] = x.UnPack()
 	}
 	t.Extra = rcv.Extra(nil).UnPack()
+	snapshotVmasLength := rcv.SnapshotVmasLength()
+	t.SnapshotVmas = make([]*VmaRawT, snapshotVmasLength)
+	for j := 0; j < snapshotVmasLength; j++ {
+		x := VmaRaw{}
+		rcv.SnapshotVmas(&x, j)
+		t.SnapshotVmas[j] = x.UnPack()
+	}
+	afterVmasLength := rcv.AfterVmasLength()
+	t.AfterVmas = make([]*VmaRawT, afterVmasLength)
+	for j := 0; j < afterVmasLength; j++ {
+		x := VmaRaw{}
+		rcv.AfterVmas(&x, j)
+		t.AfterVmas[j] = x.UnPack()
+	}
 	t.Elapsed = rcv.Elapsed()
 	t.Freshness = rcv.Freshness()
 }
@@ -3189,8 +3391,48 @@ func (rcv *ProgInfoRaw) Extra(obj *CallInfoRaw) *CallInfoRaw {
 	return nil
 }
 
-func (rcv *ProgInfoRaw) Elapsed() uint64 {
+func (rcv *ProgInfoRaw) SnapshotVmas(obj *VmaRaw, j int) bool {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ProgInfoRaw) SnapshotVmasLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *ProgInfoRaw) AfterVmas(obj *VmaRaw, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *ProgInfoRaw) AfterVmasLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *ProgInfoRaw) Elapsed() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
 	if o != 0 {
 		return rcv._tab.GetUint64(o + rcv._tab.Pos)
 	}
@@ -3198,11 +3440,11 @@ func (rcv *ProgInfoRaw) Elapsed() uint64 {
 }
 
 func (rcv *ProgInfoRaw) MutateElapsed(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(10, n)
+	return rcv._tab.MutateUint64Slot(14, n)
 }
 
 func (rcv *ProgInfoRaw) Freshness() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
 	if o != 0 {
 		return rcv._tab.GetUint64(o + rcv._tab.Pos)
 	}
@@ -3210,11 +3452,11 @@ func (rcv *ProgInfoRaw) Freshness() uint64 {
 }
 
 func (rcv *ProgInfoRaw) MutateFreshness(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(12, n)
+	return rcv._tab.MutateUint64Slot(16, n)
 }
 
 func ProgInfoRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(7)
 }
 func ProgInfoRawAddCalls(builder *flatbuffers.Builder, calls flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(calls), 0)
@@ -3231,11 +3473,23 @@ func ProgInfoRawStartExtraRawVector(builder *flatbuffers.Builder, numElems int) 
 func ProgInfoRawAddExtra(builder *flatbuffers.Builder, extra flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(2, flatbuffers.UOffsetT(extra), 0)
 }
+func ProgInfoRawAddSnapshotVmas(builder *flatbuffers.Builder, snapshotVmas flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(3, flatbuffers.UOffsetT(snapshotVmas), 0)
+}
+func ProgInfoRawStartSnapshotVmasVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func ProgInfoRawAddAfterVmas(builder *flatbuffers.Builder, afterVmas flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(4, flatbuffers.UOffsetT(afterVmas), 0)
+}
+func ProgInfoRawStartAfterVmasVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
 func ProgInfoRawAddElapsed(builder *flatbuffers.Builder, elapsed uint64) {
-	builder.PrependUint64Slot(3, elapsed, 0)
+	builder.PrependUint64Slot(5, elapsed, 0)
 }
 func ProgInfoRawAddFreshness(builder *flatbuffers.Builder, freshness uint64) {
-	builder.PrependUint64Slot(4, freshness, 0)
+	builder.PrependUint64Slot(6, freshness, 0)
 }
 func ProgInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

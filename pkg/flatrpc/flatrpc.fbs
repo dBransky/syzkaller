@@ -162,6 +162,7 @@ enum ExecFlag : uint64 (bit_flags) {
 	DedupCover,		// deduplicate coverage in executor
 	CollectComps,		// collect KCOV comparisons
 	Threaded,		// use multiple threads to mitigate blocked syscalls
+	MemCmp, 		// collect memory comparison data
 }
 
 struct ExecOptsRaw {
@@ -240,12 +241,22 @@ struct ComparisonRaw {
 	is_const		:bool;
 }
 
+table VmaRaw {
+	start			:uint64;
+	end 			:uint64;
+	perms			:uint32; // bitmask: r=1, w=2, x=4, p(private)=8, s(shared)=16
+	memory_hash		:uint32;
+	name			:string;
+}
+
 table ProgInfoRaw {
 	calls			:[CallInfoRaw];
 	// Contains signal and cover collected from background threads.
 	// The raw version is exported by executor, and them merged into extra on the host.
 	extra_raw		:[CallInfoRaw];
 	extra			:CallInfoRaw;
+	snapshot_vmas	:[VmaRaw];
+	after_vmas		:[VmaRaw];
 	// Total execution time of the program in nanoseconds.
 	elapsed			:uint64;
 	// Number of programs executed in the same process before this one.
