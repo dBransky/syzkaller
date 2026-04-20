@@ -393,6 +393,11 @@ func (vrf *Verifier) compareResults(prog *prog.Prog, responses []*queue.Result) 
 				vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, firstMismatchCall)
 			vrf.saveMismatchReport(title, reportBody.String())
 		}
+
+		hasMemMismatch, memDetails := vrf.verifyMemoryMismatches(res0.Info, res.Info, vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name)
+		if hasMemMismatch {
+			vrf.logMemoryMismatchSequence(prog, res0.Info, res.Info, vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, memDetails)
+		}
 	}
 }
 
@@ -492,6 +497,7 @@ func (kernel *Kernel) MachineChecked(features flatrpc.Feature,
 	kernel.features <- features
 	log.Logf(0, "kernel %s: configuring source", kernel.cfg.Name)
 	opts := fuzzer.DefaultExecOpts(kernel.cfg, features, kernel.debug)
+	opts.ExecFlags |= flatrpc.ExecFlagMemCmp
 	kernel.source = queue.DefaultOpts(kernel.source, opts)
 	kernel.mu.Lock()
 	kernel.queueConfigured = true
