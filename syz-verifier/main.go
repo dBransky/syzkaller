@@ -112,6 +112,10 @@ func main() {
 		sources: sources,
 	}
 
+	osutil.HandleInterrupts(vm.Shutdown)
+
 	ctx := vm.ShutdownCtx()
-	vrf.RunVerifierFuzzer(ctx)
+	if err := vrf.RunVerifierFuzzer(ctx); err != nil {
+		log.Fatalf("verifier exited with error: %v", err)
+	}
 }

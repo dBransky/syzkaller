@@ -7,6 +7,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,6 +17,7 @@ import (
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -100,10 +103,7 @@ func (vrf *Verifier) RunVerifierFuzzer(ctx context.Context) error {
 			}
 		}
 	}
-	eg.Go(func() error {
-		vrf.preloadCorpus()
-		return nil
-	})
+	vrf.preloadCorpus()
 	eg.Go(func() error {
 		log.Logf(0, "starting vrf loop")
 		return vrf.Loop(ctx)
@@ -130,6 +130,8 @@ func (vrf *Verifier) preloadCorpus() {
 // It initializes the HTTP server and starts the fuzzing process.
 func (vrf *Verifier) Loop(ctx context.Context) error {
 	log.Logf(0, "starting programs analysis")
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	g, ctx := errgroup.WithContext(ctx)
 
 	if vrf.http != nil {
@@ -148,6 +150,7 @@ func (vrf *Verifier) Loop(ctx context.Context) error {
 	// Start the fuzzing synchronization loop.
 	g.Go(func() error {
 		vrf.verifierLoop(ctx)
+		cancel() // Stop all other goroutines once corpus comparison is done.
 		return nil
 	})
 
@@ -169,7 +172,7 @@ func (vrf *Verifier) verifierLoop(ctx context.Context) {
 	statSyscalls.Add(len(totalEnabledSyscalls))
 
 	// Log enabled syscalls.
-	log.Logf(1, "starting to compare %d programs from given corpus", len(vrf.programs))
+	log.Logf(0, "starting to compare %d programs from given corpus", len(vrf.programs))
 
 	// The main verifier loop: iterate through corpus programs and compare across kernels.
 	for progIdx, prog := range vrf.programs {
@@ -180,7 +183,7 @@ func (vrf *Verifier) verifierLoop(ctx context.Context) {
 		default:
 		}
 
-		log.Logf(1, "comparing program %d/%d", progIdx+1, len(vrf.programs))
+		log.Logf(0, "comparing program %d/%d", progIdx+1, len(vrf.programs))
 		// Create requests for all kernels.
 		requests, responses, wg := vrf.createRequests(prog)
 
@@ -252,7 +255,7 @@ func (vrf *Verifier) waitForKernelsReady(ctx context.Context) (map[*prog.Syscall
 	return totalEnabledSyscalls, comparisonFeature, nil
 }
 
-func (vrf *Verifier) saveMismatchReport(title, body string) {
+func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) {
 	if vrf.crashStore == nil {
 		return
 	}
@@ -265,6 +268,13 @@ func (vrf *Verifier) saveMismatchReport(title, body string) {
 	}
 	if _, err := vrf.crashStore.SaveCrash(crash); err != nil {
 		log.Logf(0, "failed to save mismatch report: %v", err)
+		return
+	}
+	crashedDir := filepath.Join(vrf.cfg.Workdir, "crashes", hash.String([]byte(title)))
+	if len(progBytes) > 0 {
+		if err := os.WriteFile(filepath.Join(crashedDir, "prog"), progBytes, 0640); err != nil {
+			log.Logf(0, "failed to write prog: %v", err)
+		}
 	}
 }
 
@@ -391,7 +401,7 @@ func (vrf *Verifier) compareResults(prog *prog.Prog, responses []*queue.Result) 
 			}
 			title := fmt.Sprintf("syz-verifier errno mismatch: %s vs %s (%s)",
 				vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, firstMismatchCall)
-			vrf.saveMismatchReport(title, reportBody.String())
+			vrf.saveMismatchReport(title, reportBody.String(), prog.Serialize())
 		}
 	}
 }
