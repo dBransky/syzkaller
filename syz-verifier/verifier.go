@@ -519,6 +519,7 @@ func (kernel *Kernel) MachineChecked(features flatrpc.Feature,
 	log.Logf(0, "kernel %s: configuring source", kernel.cfg.Name)
 	opts := fuzzer.DefaultExecOpts(kernel.cfg, features, kernel.debug)
 	opts.ExecFlags |= flatrpc.ExecFlagMemCmp
+	opts.ExecFlags &^= flatrpc.ExecFlagThreaded // disable threading to reduce memory comparison noise
 	kernel.source = queue.DefaultOpts(kernel.source, opts)
 	kernel.mu.Lock()
 	kernel.queueConfigured = true
