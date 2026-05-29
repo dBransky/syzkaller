@@ -7,11 +7,13 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/syzkaller/pkg/db"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
@@ -114,14 +116,24 @@ func (vrf *Verifier) RunVerifierFuzzer(ctx context.Context) error {
 func (vrf *Verifier) preloadCorpus() {
 	log.Logf(0, "loading corpus.db")
 
-	info, err := manager.LoadSeeds(vrf.cfg, false)
+	dbPath := filepath.Join(vrf.cfg.Workdir, "corpus.db")
+	corpusDB, err := db.Open(dbPath, true)
 	if err != nil {
-		log.Fatalf("failed to load corpus: %v", err)
+		log.Fatalf("failed to open corpus.db: %v", err)
 	}
-	vrf.programs = make([]*prog.Prog, len(info.Candidates))
-	for i, candidate := range info.Candidates {
-		vrf.programs[i] = candidate.Prog
+
+	vrf.programs = make([]*prog.Prog, 0, len(corpusDB.Records))
+	for key, rec := range corpusDB.Records {
+		p, err := manager.ParseSeed(vrf.target, rec.Val)
+		if err != nil {
+			log.Logf(1, "skipping program %x: %v", key, err)
+			continue
+		}
+
+		vrf.programs = append(vrf.programs, p)
 	}
+	// Drop the records from memory
+	corpusDB.DiscardData()
 
 	log.Logf(0, "loaded %d corpus programs for verification", len(vrf.programs))
 }
