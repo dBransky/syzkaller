@@ -44,7 +44,7 @@ type Verifier struct {
 	firstConnect atomic.Int64 // unix time, or 0 if not connected.
 
 	// Corpus management - load once at startup from the first config's workdir.
-	programs []*prog.Prog
+	programs chan *prog.Prog
 }
 
 // Kernel represents a single kernel configuration in the verification process.
@@ -103,7 +103,7 @@ func (vrf *Verifier) RunVerifierFuzzer(ctx context.Context) error {
 		}
 	}
 	eg.Go(func() error {
-		vrf.preloadCorpus()
+		vrf.preloadCorpus(ctx)
 		return nil
 	})
 	eg.Go(func() error {
@@ -113,7 +113,7 @@ func (vrf *Verifier) RunVerifierFuzzer(ctx context.Context) error {
 	return eg.Wait()
 }
 
-func (vrf *Verifier) preloadCorpus() {
+func (vrf *Verifier) preloadCorpus(ctx context.Context) {
 	log.Logf(0, "loading corpus.db")
 
 	dbPath := filepath.Join(vrf.cfg.Workdir, "corpus.db")
@@ -122,7 +122,8 @@ func (vrf *Verifier) preloadCorpus() {
 		log.Fatalf("failed to open corpus.db: %v", err)
 	}
 
-	vrf.programs = make([]*prog.Prog, 0, len(corpusDB.Records))
+	vrf.programs = make(chan *prog.Prog, len(corpusDB.Records))
+	loadedCount := 0
 	for key, rec := range corpusDB.Records {
 		p, err := manager.ParseSeed(vrf.target, rec.Val)
 		if err != nil {
@@ -130,12 +131,20 @@ func (vrf *Verifier) preloadCorpus() {
 			continue
 		}
 
-		vrf.programs = append(vrf.programs, p)
+		select {
+		case <-ctx.Done():
+			log.Logf(0, "corpus loading canceled by context")
+			corpusDB.DiscardData()
+			close(vrf.programs)
+			return
+		case vrf.programs <- p:
+			loadedCount++
+		}
 	}
 	// Drop the records from memory
 	corpusDB.DiscardData()
-
-	log.Logf(0, "loaded %d corpus programs for verification", len(vrf.programs))
+	close(vrf.programs)
+	log.Logf(0, "loaded %d corpus programs for verification", loadedCount)
 }
 
 // Loop starts the main verifier execution loop.
@@ -180,11 +189,9 @@ func (vrf *Verifier) verifierLoop(ctx context.Context) {
 	statSyscalls := stat.New("syscalls", "Number of enabled syscalls", stat.Simple, stat.NoGraph, stat.Link("/syscalls"))
 	statSyscalls.Add(len(totalEnabledSyscalls))
 
-	// Log enabled syscalls.
-	log.Logf(1, "starting to compare %d programs from given corpus", len(vrf.programs))
-
 	// The main verifier loop: iterate through corpus programs and compare across kernels.
-	for progIdx, prog := range vrf.programs {
+	progIdx := 0
+	for prog := range vrf.programs {
 		// Check context.
 		select {
 		case <-ctx.Done():
@@ -192,7 +199,7 @@ func (vrf *Verifier) verifierLoop(ctx context.Context) {
 		default:
 		}
 
-		log.Logf(1, "comparing program %d/%d", progIdx+1, len(vrf.programs))
+		log.Logf(1, "comparing program %d", progIdx+1)
 		// Create requests for all kernels.
 		requests, responses, wg := vrf.createRequests(prog)
 
@@ -206,6 +213,8 @@ func (vrf *Verifier) verifierLoop(ctx context.Context) {
 
 		// Compare execution results.
 		vrf.compareResults(prog, responses)
+
+		progIdx++
 	}
 }
 
