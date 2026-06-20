@@ -4,20 +4,24 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/hash"
+	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -196,7 +200,7 @@ func (vrf *Verifier) verifierLoop(ctx context.Context) {
 		wg.Wait()
 
 		// Compare execution results.
-		vrf.compareResults(prog, responses)
+		vrf.compareResults(ctx, prog, responses)
 	}
 }
 
@@ -255,9 +259,9 @@ func (vrf *Verifier) waitForKernelsReady(ctx context.Context) (map[*prog.Syscall
 	return totalEnabledSyscalls, comparisonFeature, nil
 }
 
-func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) {
+func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) string {
 	if vrf.crashStore == nil {
-		return
+		return ""
 	}
 	crash := &manager.Crash{
 		Report: &report.Report{
@@ -268,20 +272,21 @@ func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) {
 	}
 	if _, err := vrf.crashStore.SaveCrash(crash); err != nil {
 		log.Logf(0, "failed to save mismatch report: %v", err)
-		return
+		return ""
 	}
-	crashedDir := filepath.Join(vrf.cfg.Workdir, "crashes", hash.String([]byte(title)))
+	crashDir := filepath.Join(vrf.cfg.Workdir, "crashes", hash.String([]byte(title)))
 	if len(progBytes) > 0 {
-		if err := os.WriteFile(filepath.Join(crashedDir, "prog"), progBytes, 0640); err != nil {
+		if err := os.WriteFile(filepath.Join(crashDir, "prog"), progBytes, 0640); err != nil {
 			log.Logf(0, "failed to write prog: %v", err)
 		}
 	}
+	return crashDir
 }
 
 const executorCallNotCompletedErrno = 999
 
 // compareResults compares execution results across all kernels and logs any mismatches.
-func (vrf *Verifier) compareResults(prog *prog.Prog, responses []*queue.Result) {
+func (vrf *Verifier) compareResults(ctx context.Context, prog *prog.Prog, responses []*queue.Result) {
 	// Get kernel 0 result as baseline.
 	res0 := responses[0]
 	if res0 == nil {
@@ -399,11 +404,275 @@ func (vrf *Verifier) compareResults(prog *prog.Prog, responses []*queue.Result) 
 			if len(mismatchCalls) > 0 && mismatchCalls[0] < len(prog.Calls) {
 				firstMismatchCall = prog.Calls[mismatchCalls[0]].Meta.CallName
 			}
-			title := fmt.Sprintf("syz-verifier errno mismatch: %s vs %s (%s)",
-				vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, firstMismatchCall)
-			vrf.saveMismatchReport(title, reportBody.String(), prog.Serialize())
+			progBytes := prog.Serialize()
+			progHash := hash.String(progBytes)
+			title := fmt.Sprintf("syz-verifier errno mismatch: %s vs %s (%s) [%s]",
+				vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, firstMismatchCall, progHash)
+			crashDir := vrf.saveMismatchReport(title, reportBody.String(), progBytes)
+			if crashDir != "" {
+				vrf.runAndSaveStrace(ctx, crashDir, prog, 0, i)
+				vrf.runAndSaveKcov(ctx, crashDir, prog, mismatchCalls[0], 0, i)
+			}
 		}
 	}
+}
+
+// runStraceRerun compiles p to C and re-executes it on the given kernel under strace.
+// Returns nil if StraceBin is not configured or the run fails.
+func (vrf *Verifier) runStraceRerun(ctx context.Context, kernelIdx int, p *prog.Prog) []byte {
+	kernel := vrf.kernels[kernelIdx]
+	if kernel.cfg.StraceBin == "" {
+		return nil
+	}
+	opts := csource.DefaultOpts(kernel.cfg)
+	opts.Repeat = false
+	opts.Threaded = false
+	opts.Procs = 1
+	opts.NetReset = false
+	// Disable hardware-injection features: they exit(1) when the VM lacks the
+	// required kernel support, killing the child before loop() runs.
+	opts.USB = false
+	opts.VhciInjection = false
+	opts.Wifi = false
+	opts.IEEE802154 = false
+	kernel.pool.ReserveForRun(1)
+	defer kernel.pool.ReserveForRun(0)
+	var output []byte
+	err := kernel.pool.Run(ctx, func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
+		updInfo(func(info *dispatcher.Info) {
+			info.Status = "strace re-run"
+		})
+		execInst, err := instance.SetupExecProg(inst, kernel.cfg, kernel.reporter, &instance.OptionalConfig{
+			StraceBin: kernel.cfg.StraceBin,
+		})
+		if err != nil {
+			log.Logf(0, "strace rerun: setup failed for %s: %v", kernel.cfg.Name, err)
+			return
+		}
+		res, err := execInst.RunCProg(p, instance.RunOptions{
+			Duration: kernel.cfg.Timeouts.NoOutput,
+			Opts:     opts,
+		})
+		if err != nil {
+			log.Logf(0, "strace rerun: run failed for %s: %v", kernel.cfg.Name, err)
+			return
+		}
+		output = res.Output
+	})
+	if err != nil {
+		log.Logf(0, "strace rerun: pool.Run failed for %s: %v", kernel.cfg.Name, err)
+	}
+	return output
+}
+
+// runAndSaveStrace compiles the mismatching program to C and runs it under strace on both kernels
+// in parallel, saving outputs to crashDir.
+func (vrf *Verifier) runAndSaveStrace(ctx context.Context, crashDir string, p *prog.Prog, kernel0Idx, kernel1Idx int) {
+	var wg sync.WaitGroup
+	for _, kidx := range []int{kernel0Idx, kernel1Idx} {
+		kidx := kidx
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out := vrf.runStraceRerun(ctx, kidx, p)
+			if len(out) == 0 {
+				return
+			}
+			// Detect truncation: a complete strace ends with "+++ exited" or "+++ killed".
+			if !bytes.Contains(out[max(0, len(out)-200):], []byte("+++ ")) {
+				out = append(out, []byte("\n[strace truncated: VM hung or timed out before program exited]\n")...)
+			}
+			name := fmt.Sprintf("strace_%s.log", vrf.kernels[kidx].cfg.Name)
+			if err := os.WriteFile(filepath.Join(crashDir, name), out, 0640); err != nil {
+				log.Logf(0, "failed to write strace log for %s: %v", vrf.kernels[kidx].cfg.Name, err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// runAndSaveKcov runs the sub-program (calls 0..mismatchIdx) with KCOV enabled around call
+// mismatchIdx on both kernels in parallel, symbolizes the coverage, and saves the results.
+func (vrf *Verifier) runAndSaveKcov(ctx context.Context, crashDir string, p *prog.Prog, mismatchIdx, kernel0Idx, kernel1Idx int) {
+	var wg sync.WaitGroup
+	for _, kidx := range []int{kernel0Idx, kernel1Idx} {
+		kidx := kidx
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out := vrf.runKcovRerun(ctx, kidx, p, mismatchIdx)
+			if len(out) == 0 {
+				return
+			}
+			symbolized := vrf.symbolizeKcov(out, vrf.kernels[kidx].cfg.KernelObj)
+			name := fmt.Sprintf("kcov_%s.log", vrf.kernels[kidx].cfg.Name)
+			if err := os.WriteFile(filepath.Join(crashDir, name), symbolized, 0640); err != nil {
+				log.Logf(0, "failed to write kcov log for %s: %v", vrf.kernels[kidx].cfg.Name, err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// runKcovRerun compiles a sub-program (calls 0..mismatchIdx) with KCOV injected around call
+// mismatchIdx and runs it on the given kernel. Returns raw "KCOVPC 0x..." lines from stdout.
+func (vrf *Verifier) runKcovRerun(ctx context.Context, kernelIdx int, p *prog.Prog, mismatchIdx int) []byte {
+	kernel := vrf.kernels[kernelIdx]
+
+	// Build sub-prog: calls 0..mismatchIdx only (preserves all dependencies).
+	subProg := p.Clone()
+	subProg.Calls = subProg.Calls[:mismatchIdx+1]
+
+	opts := csource.DefaultOpts(kernel.cfg)
+	opts.Repeat = false
+	opts.Threaded = false
+	opts.Procs = 1
+	opts.NetReset = false
+	opts.USB = false
+	opts.VhciInjection = false
+	opts.Wifi = false
+	opts.IEEE802154 = false
+	opts.Trace = true // provides ### call=N markers needed for injection
+
+	src, err := csource.Write(subProg, opts)
+	if err != nil {
+		log.Logf(0, "kcov rerun: csource.Write failed for %s: %v", kernel.cfg.Name, err)
+		return nil
+	}
+
+	src = injectKcovInSource(src, mismatchIdx)
+
+	kernel.pool.ReserveForRun(1)
+	defer kernel.pool.ReserveForRun(0)
+	var output []byte
+	err = kernel.pool.Run(ctx, func(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
+		updInfo(func(info *dispatcher.Info) { info.Status = "kcov re-run" })
+		execInst, err := instance.SetupExecProg(inst, kernel.cfg, kernel.reporter, &instance.OptionalConfig{})
+		if err != nil {
+			log.Logf(0, "kcov rerun: setup failed for %s: %v", kernel.cfg.Name, err)
+			return
+		}
+		res, err := execInst.RunCProgRaw(src, subProg.Target, instance.RunOptions{
+			Duration: kernel.cfg.Timeouts.NoOutput,
+			Opts:     opts,
+		})
+		if err != nil {
+			log.Logf(0, "kcov rerun: run failed for %s: %v", kernel.cfg.Name, err)
+			return
+		}
+		output = res.Output
+	})
+	if err != nil {
+		log.Logf(0, "kcov rerun: pool.Run failed for %s: %v", kernel.cfg.Name, err)
+	}
+	return output
+}
+
+// injectKcovInSource modifies the generated C source (produced with opts.Trace=true) to enable
+// KCOV around call mismatchIdx only. KCOV PCs are written to stdout as "KCOVPC 0x<addr>" lines.
+func injectKcovInSource(src []byte, mismatchIdx int) []byte {
+	const kcovHelpers = `
+/* KCOV instrumentation for mismatch analysis */
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#ifndef KCOV_INIT_TRACE
+#define KCOV_INIT_TRACE _IOR('c', 1, unsigned long)
+#define KCOV_ENABLE     _IO('c', 100)
+#define KCOV_DISABLE    _IO('c', 101)
+#endif
+#define __KCOV_COVER_SIZE (16 << 20)
+static unsigned long *__kcov_buf;
+static int __kcov_fd = -1;
+static void __kcov_enable_trace(void) {
+	__kcov_fd = open("/sys/kernel/debug/kcov", O_RDWR);
+	if (__kcov_fd < 0) return;
+	if (ioctl(__kcov_fd, KCOV_INIT_TRACE, __KCOV_COVER_SIZE)) { close(__kcov_fd); __kcov_fd = -1; return; }
+	__kcov_buf = (unsigned long*)mmap(NULL, __KCOV_COVER_SIZE * sizeof(unsigned long),
+		PROT_READ|PROT_WRITE, MAP_SHARED, __kcov_fd, 0);
+	if (__kcov_buf == (void*)-1) { close(__kcov_fd); __kcov_fd = -1; return; }
+	__atomic_store_n(&__kcov_buf[0], 0, __ATOMIC_RELAXED);
+	ioctl(__kcov_fd, KCOV_ENABLE, 0);
+}
+static void __kcov_dump(void) {
+	if (__kcov_fd < 0) return;
+	ioctl(__kcov_fd, KCOV_DISABLE, 0);
+	unsigned long __n = __atomic_load_n(&__kcov_buf[0], __ATOMIC_RELAXED);
+	unsigned long __i;
+	for (__i = 0; __i < __n; __i++)
+		fprintf(stdout, "KCOVPC 0x%lx\n", __kcov_buf[__i + 1]);
+	fflush(stdout);
+}
+`
+	// injectAfterMarker finds marker in s, advances to end of its line, and inserts code.
+	injectAfterMarker := func(s, marker, code string) string {
+		idx := strings.Index(s, marker)
+		if idx < 0 {
+			return s
+		}
+		nl := strings.Index(s[idx:], "\n")
+		if nl < 0 {
+			return s
+		}
+		pos := idx + nl + 1
+		return s[:pos] + code + s[pos:]
+	}
+
+	s := string(src)
+
+	// Inject dump after the mismatch call's trace fprintf — search from the end so we don't
+	// accidentally match an earlier identical call index string.
+	dumpMarker := fmt.Sprintf("### call=%d errno=%%u\\n\"", mismatchIdx)
+	s = injectAfterMarker(s, dumpMarker, "\t__kcov_dump();\n")
+
+	// Inject enable after the previous call's trace fprintf (or after ### start for call 0).
+	var enableMarker string
+	if mismatchIdx == 0 {
+		enableMarker = "fprintf(stderr, \"### start\\n\");"
+	} else {
+		enableMarker = fmt.Sprintf("### call=%d errno=%%u\\n\"", mismatchIdx-1)
+	}
+	s = injectAfterMarker(s, enableMarker, "\t__kcov_enable_trace();\n")
+
+	// Inject KCOV helper functions before loop().
+	if idx := strings.Index(s, "\nstatic void loop("); idx >= 0 {
+		s = s[:idx+1] + kcovHelpers + s[idx+1:]
+	}
+
+	return []byte(s)
+}
+
+// symbolizeKcov extracts KCOVPC lines from output and symbolizes them with addr2line.
+// Falls back to raw PC list if addr2line is unavailable or vmlinux not found.
+func (vrf *Verifier) symbolizeKcov(output []byte, kernelObjDir string) []byte {
+	var pcs []string
+	for _, line := range strings.Split(string(output), "\n") {
+		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "KCOVPC "); ok {
+			pcs = append(pcs, strings.TrimSpace(after))
+		}
+	}
+	if len(pcs) == 0 {
+		return []byte("[kcov: no coverage PCs collected]\n")
+	}
+
+	vmlinux := filepath.Join(kernelObjDir, "vmlinux")
+	if _, err := os.Stat(vmlinux); err != nil {
+		return []byte(strings.Join(pcs, "\n") + "\n")
+	}
+
+	addr2line, err := exec.LookPath("addr2line")
+	if err != nil {
+		return []byte(strings.Join(pcs, "\n") + "\n")
+	}
+
+	// addr2line reads addresses from stdin when none given on command line.
+	cmd := exec.Command(addr2line, "-e", vmlinux, "-f", "-i")
+	cmd.Stdin = strings.NewReader(strings.Join(pcs, "\n") + "\n")
+	symbolized, err := cmd.Output()
+	if err != nil {
+		return []byte(strings.Join(pcs, "\n") + "\n")
+	}
+	return symbolized
 }
 
 // createRequests creates execution requests for all kernels for a given program.
