@@ -59,13 +59,13 @@ func ReadCrashStore(workdir string) *CrashStore {
 }
 
 // Returns whether it was the first crash of a kind.
-func (cs *CrashStore) SaveCrash(crash *Crash) (bool, error) {
+func (cs *CrashStore) SaveCrash(crash *Crash) (int, bool, error) {
 	dir := cs.path(crash.Title)
 	osutil.MkdirAll(dir)
 
 	err := osutil.WriteFile(filepath.Join(dir, "description"), []byte(crash.Title+"\n"))
 	if err != nil {
-		return false, fmt.Errorf("failed to write crash: %w", err)
+		return 0, false, fmt.Errorf("failed to write crash: %w", err)
 	}
 
 	// Save up to cs.cfg.MaxCrashLogs reports, overwrite the oldest once we've reached that number.
@@ -101,16 +101,16 @@ func (cs *CrashStore) SaveCrash(crash *Crash) (bool, error) {
 	writeOrRemove("report", report.MergeReportBytes(reps))
 	writeOrRemove("machineInfo", crash.MachineInfo)
 	if err := report.AddTitleStat(filepath.Join(dir, "title-stat"), reps); err != nil {
-		return false, fmt.Errorf("report.AddTitleStat: %w", err)
+		return 0, false, fmt.Errorf("report.AddTitleStat: %w", err)
 	}
 
 	if crash.MemoryDump != "" {
 		if err := osutil.Rename(crash.MemoryDump, filepath.Join(dir, "vmcore")); err != nil {
-			return false, fmt.Errorf("failed to move memory dump: %w", err)
+			return 0, false, fmt.Errorf("failed to move memory dump: %w", err)
 		}
 	}
 
-	return first, nil
+	return oldestI, first, nil
 }
 
 func (cs *CrashStore) HasRepro(title string) bool {

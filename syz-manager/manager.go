@@ -807,7 +807,7 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 		// There is 0 chance that one will ever look in the crashes/ folder of those instances.
 		return mgr.cfg.Reproduce && resp.NeedRepro
 	}
-	first, err := mgr.crashStore.SaveCrash(crash)
+	_, first, err := mgr.crashStore.SaveCrash(crash)
 	if err != nil {
 		log.Logf(0, "failed to save the crash: %v", err)
 		return false

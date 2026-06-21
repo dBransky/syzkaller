@@ -259,9 +259,9 @@ func (vrf *Verifier) waitForKernelsReady(ctx context.Context) (map[*prog.Syscall
 	return totalEnabledSyscalls, comparisonFeature, nil
 }
 
-func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) string {
+func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) (string, int) {
 	if vrf.crashStore == nil {
-		return ""
+		return "", 0
 	}
 	crash := &manager.Crash{
 		Report: &report.Report{
@@ -270,9 +270,10 @@ func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) st
 			Output: []byte(body),
 		},
 	}
-	if _, err := vrf.crashStore.SaveCrash(crash); err != nil {
+	slot, _, err := vrf.crashStore.SaveCrash(crash)
+	if err != nil {
 		log.Logf(0, "failed to save mismatch report: %v", err)
-		return ""
+		return "", 0
 	}
 	crashDir := filepath.Join(vrf.cfg.Workdir, "crashes", hash.String([]byte(title)))
 	if len(progBytes) > 0 {
@@ -280,7 +281,7 @@ func (vrf *Verifier) saveMismatchReport(title, body string, progBytes []byte) st
 			log.Logf(0, "failed to write prog: %v", err)
 		}
 	}
-	return crashDir
+	return crashDir, slot
 }
 
 const executorCallNotCompletedErrno = 999
@@ -408,10 +409,11 @@ func (vrf *Verifier) compareResults(ctx context.Context, prog *prog.Prog, respon
 			progHash := hash.String(progBytes)
 			title := fmt.Sprintf("syz-verifier errno mismatch: %s vs %s (%s) [%s]",
 				vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, firstMismatchCall, progHash)
-			crashDir := vrf.saveMismatchReport(title, reportBody.String(), progBytes)
+			writeLine("Crash dir: %s", hash.String([]byte(title)))
+			crashDir, slot := vrf.saveMismatchReport(title, reportBody.String(), progBytes)
 			if crashDir != "" {
-				vrf.runAndSaveStrace(ctx, crashDir, prog, 0, i)
-				vrf.runAndSaveKcov(ctx, crashDir, prog, mismatchCalls[0], 0, i)
+				vrf.runAndSaveStrace(ctx, crashDir, slot, prog, 0, i)
+				vrf.runAndSaveKcov(ctx, crashDir, slot, prog, mismatchCalls[0], 0, i)
 			}
 		}
 	}
@@ -467,7 +469,7 @@ func (vrf *Verifier) runStraceRerun(ctx context.Context, kernelIdx int, p *prog.
 
 // runAndSaveStrace compiles the mismatching program to C and runs it under strace on both kernels
 // in parallel, saving outputs to crashDir.
-func (vrf *Verifier) runAndSaveStrace(ctx context.Context, crashDir string, p *prog.Prog, kernel0Idx, kernel1Idx int) {
+func (vrf *Verifier) runAndSaveStrace(ctx context.Context, crashDir string, slot int, p *prog.Prog, kernel0Idx, kernel1Idx int) {
 	var wg sync.WaitGroup
 	for _, kidx := range []int{kernel0Idx, kernel1Idx} {
 		kidx := kidx
@@ -482,7 +484,7 @@ func (vrf *Verifier) runAndSaveStrace(ctx context.Context, crashDir string, p *p
 			if !bytes.Contains(out[max(0, len(out)-200):], []byte("+++ ")) {
 				out = append(out, []byte("\n[strace truncated: VM hung or timed out before program exited]\n")...)
 			}
-			name := fmt.Sprintf("strace_%s.log", vrf.kernels[kidx].cfg.Name)
+			name := fmt.Sprintf("strace_%s_%d.log", vrf.kernels[kidx].cfg.Name, slot)
 			if err := os.WriteFile(filepath.Join(crashDir, name), out, 0640); err != nil {
 				log.Logf(0, "failed to write strace log for %s: %v", vrf.kernels[kidx].cfg.Name, err)
 			}
@@ -493,7 +495,7 @@ func (vrf *Verifier) runAndSaveStrace(ctx context.Context, crashDir string, p *p
 
 // runAndSaveKcov runs the sub-program (calls 0..mismatchIdx) with KCOV enabled around call
 // mismatchIdx on both kernels in parallel, symbolizes the coverage, and saves the results.
-func (vrf *Verifier) runAndSaveKcov(ctx context.Context, crashDir string, p *prog.Prog, mismatchIdx, kernel0Idx, kernel1Idx int) {
+func (vrf *Verifier) runAndSaveKcov(ctx context.Context, crashDir string, slot int, p *prog.Prog, mismatchIdx, kernel0Idx, kernel1Idx int) {
 	var wg sync.WaitGroup
 	for _, kidx := range []int{kernel0Idx, kernel1Idx} {
 		kidx := kidx
@@ -505,7 +507,7 @@ func (vrf *Verifier) runAndSaveKcov(ctx context.Context, crashDir string, p *pro
 				return
 			}
 			symbolized := vrf.symbolizeKcov(out, vrf.kernels[kidx].cfg.KernelObj)
-			name := fmt.Sprintf("kcov_%s.log", vrf.kernels[kidx].cfg.Name)
+			name := fmt.Sprintf("kcov_%s_%d.log", vrf.kernels[kidx].cfg.Name, slot)
 			if err := os.WriteFile(filepath.Join(crashDir, name), symbolized, 0640); err != nil {
 				log.Logf(0, "failed to write kcov log for %s: %v", vrf.kernels[kidx].cfg.Name, err)
 			}
@@ -520,8 +522,14 @@ func (vrf *Verifier) runKcovRerun(ctx context.Context, kernelIdx int, p *prog.Pr
 	kernel := vrf.kernels[kernelIdx]
 
 	// Build sub-prog: calls 0..mismatchIdx only (preserves all dependencies).
+	// Use RemoveCall (not slice truncation) so that resource use/def links are
+	// properly cleaned up: removeArg clears Ret.uses on producing calls, making
+	// SerializeForExec emit ExecNoCopyout instead of a copyout slot, which
+	// otherwise causes DeserializeExec to fail with "mismatching number of vars".
 	subProg := p.Clone()
-	subProg.Calls = subProg.Calls[:mismatchIdx+1]
+	for i := len(subProg.Calls) - 1; i > mismatchIdx; i-- {
+		subProg.RemoveCall(i)
+	}
 
 	opts := csource.DefaultOpts(kernel.cfg)
 	opts.Repeat = false
@@ -709,7 +717,36 @@ func (vrf *Verifier) createRequests(prog *prog.Prog) (map[int]*queue.Request, []
 // Kernel
 // =============================================================================.
 
+func (kernel *Kernel) logKernelVersion(ctx context.Context, inst *vm.Instance) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	outc, errc, err := inst.RunStream(timeoutCtx, "uname -a")
+	if err != nil {
+		log.Logf(0, "kernel %s: uname -a launch failed: %v", kernel.cfg.Name, err)
+		return
+	}
+	var output []byte
+	// outc is the VM's global merger channel (never closes while VM is alive),
+	// so select on errc/ctx to know when the SSH command has finished.
+collect:
+	for {
+		select {
+		case chunk, ok := <-outc:
+			if !ok {
+				break collect
+			}
+			output = append(output, chunk.Data...)
+		case <-errc:
+			break collect
+		case <-timeoutCtx.Done():
+			break collect
+		}
+	}
+	log.Logf(0, "kernel %s: uname -a: %s", kernel.cfg.Name, bytes.TrimSpace(output))
+}
+
 func (kernel *Kernel) FuzzerInstance(ctx context.Context, inst *vm.Instance, updInfo dispatcher.UpdateInfo) {
+	kernel.logKernelVersion(ctx, inst)
 	index := inst.Index()
 	injectExec := make(chan bool, 10)
 	kernel.serv.CreateInstance(index, injectExec, updInfo)
