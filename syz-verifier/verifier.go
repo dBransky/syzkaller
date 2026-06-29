@@ -427,7 +427,7 @@ func (vrf *Verifier) compareResults(prog *prog.Prog, responses []*queue.Result) 
 
 			firstMismatchCall := "unknown"
 			if len(mismatchCalls) > 0 && mismatchCalls[0] < len(prog.Calls) {
-				firstMismatchCall = prog.Calls[mismatchCalls[0]].Meta.CallName
+				firstMismatchCall = prog.Calls[mismatchCalls[0]].Meta.Name
 			}
 			title := fmt.Sprintf("syz-verifier errno mismatch: %s vs %s (%s)",
 				vrf.kernels[0].cfg.Name, vrf.kernels[i].cfg.Name, firstMismatchCall)
@@ -447,7 +447,11 @@ func (vrf *Verifier) compareResults(prog *prog.Prog, responses []*queue.Result) 
 			divergentIdx := -1
 			if deepRes[0] != nil && deepRes[i] != nil && deepRes[0].Info != nil && deepRes[i].Info != nil {
 				divergentIdx = vrf.verifyDeepMemoryMismatches(deepRes[0].Info, deepRes[i].Info)
-				if divergentIdx >= 0 {
+				if divergentIdx != -1 {
+					if nonDeterministicSyscalls[prog.Calls[divergentIdx].Meta.Name] {
+						log.Logf(0, "Deep Mode Analysis: Divergence at Call [%d] (%s) is due to non-deterministic syscall behavior. Ignoring.", divergentIdx, prog.Calls[divergentIdx].Meta.Name)
+						continue
+					}
 					memDetails = fmt.Sprintf("Deep Mode Analysis: Memory diverged at Call [%d]\n\n%s", divergentIdx, memDetails)
 				} else {
 					memDetails = "Deep Mode Analysis: No syscall divergence found despite triage mismatch.\n\n" + memDetails

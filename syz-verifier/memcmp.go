@@ -106,6 +106,37 @@ func mapVMAs(rawVMAs []*flatrpc.VmaRawT) map[uint64]VmaState {
 	return vmaMap
 }
 
+var nonDeterministicSyscalls = map[string]bool{
+	// 1. HARD DATA SOURCES (Time/Randomness)
+	"getrandom":     true,
+	"clock_gettime": true,
+	"clock_adjtime": true,
+	"sysinfo":       true,
+	"rseq":          true,
+
+	// 2. FILESYSTEM METADATA (VFS State Drift)
+	"getdents64":        true,
+	"getdents":          true,
+	"stat":              true,
+	"fstat":             true,
+	"lstat":             true,
+	"statfs":            true,
+	"name_to_handle_at": true,
+
+	// 3. IDENTIFIERS (Kernel Counters)
+	"request_key":       true,
+	"add_key$keyring":   true,
+	"keyctl$dh_compute": true,
+
+	// 4. NETWORKING (Async State Drift)
+	"getsockname$packet":                           true,
+	"getsockopt$inet_sctp6_SCTP_SOCKOPT_CONNECTX3": true,
+	"sendmsg$nl_xfrm":                              true,
+	"sendmmsg$inet":                                true,
+	"sendto$netrom":                                true,
+	"sendmsg$DEVLINK_CMD_GET":                      true,
+}
+
 func (vrf *Verifier) verifyMemoryMismatches(info0, info1 *flatrpc.ProgInfoRawT, kernelName0, kernelName1 string) (bool, string) {
 	snap0 := mapVMAs(info0.SnapshotVmas)
 	snap1 := mapVMAs(info1.SnapshotVmas)
@@ -211,7 +242,7 @@ func (vrf *Verifier) logMemoryMismatchSequence(
 
 	progLines := strings.Split(strings.TrimSpace(string(p.Serialize())), "\n")
 	for callIdx, call := range p.Calls {
-		callStr := call.Meta.CallName + "(...)"
+		callStr := call.Meta.Name + "(...)"
 		if callIdx < len(progLines) {
 			callStr = progLines[callIdx]
 		}
@@ -231,8 +262,8 @@ func (vrf *Verifier) logMemoryMismatchSequence(
 	writeLine("-------------------------------------------")
 
 	firstMismatchCall := "unknown"
-	if divergentIdx >= 0 && divergentIdx < len(p.Calls) {
-		firstMismatchCall = p.Calls[divergentIdx].Meta.CallName
+	if divergentIdx != -1 && divergentIdx < len(p.Calls) {
+		firstMismatchCall = p.Calls[divergentIdx].Meta.Name
 	}
 	title := fmt.Sprintf("syz-verifier memory mismatch: %s vs %s (%s)", name0, name1, firstMismatchCall)
 	vrf.saveMismatchReport(title, reportBody.String())
